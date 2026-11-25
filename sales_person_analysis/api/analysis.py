@@ -33,6 +33,9 @@ Amount rules
   submitted invoices. Paid means nothing is left to collect. All is both,
   and it is the default. A credit note has no amount left to collect, so it
   is Paid, not Pending. Cancelled documents are never included.
+- Delivery status is a separate filter on the same submitted documents.
+  Pending means stock is still to deliver. Delivered means nothing is left
+  to deliver. All is both, and it is the default. See _delivery_condition.
 - Sales Order has no return document. A credit note does not change a
   submitted order's base_grand_total, so Sales Order mode is order totals only.
 """
@@ -57,6 +60,10 @@ from sales_person_analysis.api.scope import (
 from sales_person_analysis.constants import (
 	ALLOWED_DOCTYPES,
 	DEFAULT_PAGE_SIZE,
+	DELIVERY_ALL,
+	DELIVERY_DELIVERED,
+	DELIVERY_PENDING,
+	DELIVERY_STATUSES,
 	DOCUMENT_STATUSES,
 	MAX_EXPORT_ROWS,
 	STATUS_ALL,
@@ -84,10 +91,15 @@ DOCTYPE_META = {
 
 
 @frappe.whitelist()
-def get_filter_options(doctype: str = "Sales Invoice", status: str | None = None):
+def get_filter_options(
+	doctype: str = "Sales Invoice",
+	status: str | None = None,
+	delivery_status: str | None = None,
+):
 	"""Return sales persons, item groups, years, and period hierarchy options."""
 	doctype = _validate_doctype(doctype)
 	status = _validate_status(status)
+	delivery_status = _validate_delivery_status(delivery_status)
 	ctx = _scope_or_throw()
 	company = _get_company()
 	if ctx["restricted"]:
@@ -102,8 +114,9 @@ def get_filter_options(doctype: str = "Sales Invoice", status: str | None = None
 		"currency": frappe.get_cached_value("Company", company, "default_currency") or "",
 		"sales_persons": sales_persons,
 		"item_groups": _get_item_groups(),
-		"years": _get_years(doctype, company, year_sales_persons, status),
+		"years": _get_years(doctype, company, year_sales_persons, status, delivery_status),
 		"status": status,
+		"delivery_status": delivery_status,
 		"period": hierarchy_options(year=getdate().year),
 		"restriction": public_restriction(ctx),
 	}
@@ -123,6 +136,7 @@ def get_customer_wise_sales(filters=None):
 	filters.pop("allowed_sales_persons", None)
 	doctype = _validate_doctype(filters.get("doctype") or "Sales Invoice")
 	status = _validate_status(filters.get("status"))
+	delivery_status = _validate_delivery_status(filters.get("delivery_status"))
 
 	page = max(cint(filters.get("page") or 1), 1)
 	page_size = cint(filters.get("page_size") or DEFAULT_PAGE_SIZE)
@@ -140,14 +154,22 @@ def get_customer_wise_sales(filters=None):
 
 	month_nums = resolve_months(filters.get("half"), filters.get("quarter"), filters.get("months"))
 	if month_nums is not None and not month_nums:
-		return _empty_result(company, doctype, page, page_size, status)
+		return _empty_result(company, doctype, page, page_size, status, delivery_status)
 
 	weeks = parse_week_list(filters.get("weeks"))
 	item_groups = _parse_names(filters.get("item_groups"))
 
 	meta = DOCTYPE_META[doctype]
 	conditions, values = _base_conditions(
-		doctype, company, meta, year, month_nums, weeks, sales_persons, status
+		doctype,
+		company,
+		meta,
+		year,
+		month_nums,
+		weeks,
+		sales_persons,
+		status,
+		delivery_status,
 	)
 
 	if item_groups:
@@ -165,6 +187,7 @@ def get_customer_wise_sales(filters=None):
 		"currency": currency,
 		"doctype": doctype,
 		"status": status,
+		"delivery_status": delivery_status,
 		"rows": rows,
 		"grand_total": flt(grand_total),
 		"customer_count": cint(customer_count),
@@ -174,13 +197,16 @@ def get_customer_wise_sales(filters=None):
 	}
 
 
-def _empty_result(company, doctype, page, page_size, status=STATUS_ALL):
+def _empty_result(
+	company, doctype, page, page_size, status=STATUS_ALL, delivery_status=DELIVERY_ALL
+):
 	currency = frappe.get_cached_value("Company", company, "default_currency") or ""
 	return {
 		"company": company,
 		"currency": currency,
 		"doctype": doctype,
 		"status": status,
+		"delivery_status": delivery_status,
 		"rows": [],
 		"grand_total": 0.0,
 		"customer_count": 0,
@@ -202,6 +228,13 @@ def _validate_status(status: str | None) -> str:
 	if status not in DOCUMENT_STATUSES:
 		frappe.throw(_("Status must be Pending, Paid, or All"))
 	return status
+
+
+def _validate_delivery_status(delivery_status: str | None) -> str:
+	delivery_status = (delivery_status or DELIVERY_ALL).strip()
+	if delivery_status not in DELIVERY_STATUSES:
+		frappe.throw(_("Delivery status must be All, Delivered, or Pending"))
+	return delivery_status
 
 
 def _payment_condition(doctype: str, status: str, alias: str = "doc") -> str | None:
@@ -242,6 +275,51 @@ def _sales_order_amount_due_sql(alias: str = "doc") -> str:
 			)
 	), 0)"""
 	return f"(({order_total}) - ({collected}))"
+
+
+def _delivery_condition(doctype: str, delivery_status: str, alias: str = "doc") -> str | None:
+	"""SQL predicate for the delivery filter. None means every submitted document."""
+	delivery_status = _validate_delivery_status(delivery_status)
+	if delivery_status == DELIVERY_ALL:
+		return None
+	if doctype == "Sales Order":
+		# Fully Delivered, closed, not applicable, or skip-delivery orders have
+		# nothing left to ship. Partly and not delivered stay Pending.
+		# per_delivered uses the same cutoff as ERPNext status_updater.
+		delivered = (
+			f"(IFNULL({alias}.skip_delivery_note, 0) = 1 "
+			f"OR {alias}.delivery_status IN ('Fully Delivered', 'Not Applicable', 'Closed') "
+			f"OR IFNULL({alias}.per_delivered, 0) >= 99.999999)"
+		)
+		if delivery_status == DELIVERY_DELIVERED:
+			return delivered
+		return f"NOT {delivered}"
+	pending = _sales_invoice_pending_delivery_sql(alias)
+	if delivery_status == DELIVERY_PENDING:
+		return pending
+	return f"NOT ({pending})"
+
+
+def _sales_invoice_pending_delivery_sql(alias: str = "doc") -> str:
+	"""Invoice still has company stock to deliver.
+
+	update_stock and credit notes are not pending. A row created from a
+	Delivery Note (dn_detail) is already delivered. Drop-ship rows are left
+	out: ERPNext does not make a Delivery Note for them. Non-stock rows are
+	not delivery work, so a service-only invoice is Delivered.
+	"""
+	return f"""IFNULL({alias}.update_stock, 0) = 0
+		AND IFNULL({alias}.is_return, 0) = 0
+		AND EXISTS (
+			SELECT 1
+			FROM `tabSales Invoice Item` sii
+			INNER JOIN `tabItem` item ON item.name = sii.item_code
+			WHERE sii.parent = {alias}.name
+				AND item.is_stock_item = 1
+				AND IFNULL(sii.delivered_by_supplier, 0) = 0
+				AND IFNULL(sii.dn_detail, '') = ''
+				AND IFNULL(sii.qty, 0) - IFNULL(sii.delivered_qty, 0) > 0.000001
+		)"""
 
 
 def _get_company() -> str:
@@ -289,6 +367,7 @@ def _get_years(
 	company: str,
 	sales_persons: list[str] | None = None,
 	status: str = STATUS_ALL,
+	delivery_status: str = DELIVERY_ALL,
 ) -> list[int]:
 	date_field = DOCTYPE_META[doctype]["date_field"]
 	current_year = getdate().year
@@ -301,6 +380,9 @@ def _get_years(
 	payment = _payment_condition(doctype, status)
 	if payment:
 		conditions.append(payment)
+	delivery = _delivery_condition(doctype, delivery_status)
+	if delivery:
+		conditions.append(delivery)
 	if sales_persons is not None:
 		# Restricted users only see years that contain their own documents.
 		conditions.append(
@@ -346,9 +428,11 @@ def _base_conditions(
 	weeks,
 	sales_persons,
 	status=STATUS_ALL,
+	delivery_status=DELIVERY_ALL,
 ):
 	date_field = meta["date_field"]
 	status = _validate_status(status)
+	delivery_status = _validate_delivery_status(delivery_status)
 	conditions = [
 		"doc.docstatus = 1",
 		"doc.company = %(company)s",
@@ -364,6 +448,10 @@ def _base_conditions(
 	payment = _payment_condition(doctype, status)
 	if payment:
 		conditions.append(payment)
+
+	delivery = _delivery_condition(doctype, delivery_status)
+	if delivery:
+		conditions.append(delivery)
 
 	if month_nums is not None:
 		conditions.append(f"MONTH(doc.`{date_field}`) IN %(months)s")

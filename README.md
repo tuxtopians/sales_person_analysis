@@ -33,7 +33,15 @@ Link the user on an active Employee (`user_id`) and that Employee on an enabled 
 
 Sales Invoice mode includes submitted credit notes (`is_return` = 1, docstatus Submitted). A credit note already stores a negative VAT-inclusive total, so it reduces the customer row, the grand total, item-group amounts, and the CSV export. The week and month are the credit note's own posting date. A customer whose only document in that period is a credit note still appears, with a negative amount. Cancelled credit notes are left out.
 
-**Pending**, **Paid**, and **All** filter submitted documents by what the customer still owes. Pending is unpaid or only partly paid. Paid is fully settled. All is both, and it is the default. A Sales Invoice is pending while `outstanding_amount` is greater than zero. A Sales Order is pending while its total is not covered by `advance_paid` plus payments on linked submitted invoices. A credit note has nothing left to collect, so it is Paid. Drafts and cancelled documents stay out of every mode. The year list follows the selected status.
+**Payment** and **Delivery** sit on the same row as Sales Invoice and Sales Order. Each filter is All, then the settled value, then Pending. All is the default for both.
+
+Payment filters submitted documents by what the customer still owes. Pending is unpaid or only partly paid. Paid is fully settled. A Sales Invoice is pending while `outstanding_amount` is greater than zero. A Sales Order is pending while its total is not covered by `advance_paid` plus payments on linked submitted invoices. A credit note has nothing left to collect, so it is Paid. Drafts and cancelled documents stay out of every mode. The year list follows the selected payment and delivery filters.
+
+Delivery filters the same submitted documents by what is still to ship. Pending means stock is still to deliver. Delivered means nothing is left to deliver.
+
+A Sales Order is delivered when `delivery_status` is Fully Delivered, Not Applicable, or Closed, when `per_delivered` is at least 99.999999, or when `skip_delivery_note` is set. Partly Delivered and Not Delivered stay Pending.
+
+A Sales Invoice is pending when `update_stock` is off and it is not a credit note, and a stock row still has quantity above `delivered_qty`. A row from a Delivery Note (`dn_detail`) is already delivered. Drop-ship rows are not company delivery work. A service-only invoice is Delivered. An `update_stock` invoice is Delivered. A credit note is Delivered.
 
 The sales person is the one on the credit note's Sales Team, and role scope applies to that person. ERPNext's Return button does not copy Sales Team, so the sales person has to be on the credit note or it will not reduce that person's figures.
 
