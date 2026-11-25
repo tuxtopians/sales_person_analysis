@@ -30,6 +30,20 @@
 	padding-top: 0;
 }
 
+.spa-page .spa-filter-group {
+	display: inline-flex;
+	flex-wrap: wrap;
+	align-items: center;
+	gap: 0.5rem;
+	margin-left: 0.85rem;
+}
+
+.spa-page .spa-filter-label {
+	font-size: var(--text-sm);
+	font-weight: 600;
+	color: var(--text-muted);
+}
+
 .spa-page .spa-chip {
 	display: inline-flex;
 	align-items: center;

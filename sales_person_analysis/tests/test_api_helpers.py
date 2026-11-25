@@ -127,6 +127,56 @@ class TestApiHelpers(UnitTestCase):
 		self.assertIn("<= 0", so_paid)
 		self.assertIsNone(analysis_mod._payment_condition("Sales Invoice", "All"))
 
+	def test_delivery_conditions(self):
+		meta = DOCTYPE_META["Sales Invoice"]
+		pending, _values = analysis_mod._base_conditions(
+			"Sales Invoice",
+			"Co",
+			meta,
+			year=2026,
+			month_nums=None,
+			weeks=[],
+			sales_persons=[],
+			delivery_status="Pending",
+		)
+		delivered, _values = analysis_mod._base_conditions(
+			"Sales Invoice",
+			"Co",
+			meta,
+			year=2026,
+			month_nums=None,
+			weeks=[],
+			sales_persons=[],
+			delivery_status="Delivered",
+		)
+		pending_sql = " ".join(pending)
+		delivered_sql = " ".join(delivered)
+		self.assertIn("update_stock", pending_sql)
+		self.assertIn("is_stock_item", pending_sql)
+		self.assertIn("delivered_qty", pending_sql)
+		self.assertIn("dn_detail", pending_sql)
+		self.assertIn("is_return", pending_sql)
+		self.assertNotIn("outstanding_amount", pending_sql)
+		self.assertTrue(delivered_sql.strip().count("NOT") >= 1)
+		self.assertIn("update_stock", delivered_sql)
+
+		so_pending = analysis_mod._delivery_condition("Sales Order", "Pending")
+		self.assertIn("delivery_status", so_pending)
+		self.assertIn("per_delivered", so_pending)
+		self.assertIn("skip_delivery_note", so_pending)
+		self.assertIn("NOT", so_pending)
+		so_delivered = analysis_mod._delivery_condition("Sales Order", "Delivered")
+		self.assertIn("Fully Delivered", so_delivered)
+		self.assertNotIn("NOT", so_delivered)
+		self.assertIsNone(analysis_mod._delivery_condition("Sales Invoice", "All"))
+
+	def test_validate_delivery_status(self):
+		self.assertEqual(analysis_mod._validate_delivery_status(None), "All")
+		self.assertEqual(analysis_mod._validate_delivery_status(" Delivered "), "Delivered")
+		self.assertEqual(analysis_mod._validate_delivery_status("Pending"), "Pending")
+		with self.assertRaises(Exception):
+			analysis_mod._validate_delivery_status("Partly Delivered")
+
 	def test_validate_status(self):
 		self.assertEqual(analysis_mod._validate_status(None), "All")
 		self.assertEqual(analysis_mod._validate_status(" Pending "), "Pending")

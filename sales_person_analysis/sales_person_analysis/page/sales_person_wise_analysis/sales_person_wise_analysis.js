@@ -22,6 +22,7 @@ class SalesPersonWiseAnalysis {
 		this.state = {
 			doctype: "Sales Invoice",
 			status: "All",
+			delivery_status: "All",
 			sales_persons: [],
 			year: String(new Date().getFullYear()),
 			half: "All",
@@ -78,7 +79,6 @@ class SalesPersonWiseAnalysis {
 		this.$root.html(`
 			<div class="spa-filter-panel">
 				<div class="spa-filter-row spa-doctype-row"></div>
-				<div class="spa-filter-row spa-status-row"></div>
 				<div class="spa-filter-row spa-sales-person-row"></div>
 				<div class="spa-filter-row spa-date-row"></div>
 				<div class="spa-filter-row spa-month-row"></div>
@@ -125,6 +125,14 @@ class SalesPersonWiseAnalysis {
 			const status = String($(e.currentTarget).data("status"));
 			if (status === this.state.status) return;
 			this.state.status = status;
+			this.state.page = 1;
+			this.load_filter_options().then(() => this.schedule_refresh());
+		});
+
+		this.$root.on("click", "[data-delivery]", (e) => {
+			const delivery_status = String($(e.currentTarget).data("delivery"));
+			if (delivery_status === this.state.delivery_status) return;
+			this.state.delivery_status = delivery_status;
 			this.state.page = 1;
 			this.load_filter_options().then(() => this.schedule_refresh());
 		});
@@ -256,7 +264,11 @@ class SalesPersonWiseAnalysis {
 		try {
 			const message = await frappe.xcall(
 				"sales_person_analysis.api.analysis.get_filter_options",
-				{ doctype: this.state.doctype, status: this.state.status }
+				{
+					doctype: this.state.doctype,
+					status: this.state.status,
+					delivery_status: this.state.delivery_status,
+				}
 			);
 			this.options.sales_persons = message.sales_persons || [];
 			this.restriction = message.restriction || {
@@ -311,7 +323,6 @@ class SalesPersonWiseAnalysis {
 
 	render_filters() {
 		this.render_doctypes();
-		this.render_statuses();
 		this.render_sales_persons();
 		this.render_date_controls();
 		this.render_months();
@@ -320,7 +331,7 @@ class SalesPersonWiseAnalysis {
 	}
 
 	render_doctypes() {
-		const html = ["Sales Invoice", "Sales Order"]
+		const doctypes = ["Sales Invoice", "Sales Order"]
 			.map((dt) => {
 				const selected = this.state.doctype === dt ? "is-selected" : "";
 				return `<button type="button" class="spa-chip ${selected}" data-doctype="${dt}" aria-pressed="${
@@ -328,19 +339,33 @@ class SalesPersonWiseAnalysis {
 				}">${__(dt)}</button>`;
 			})
 			.join("");
-		this.$root.find(".spa-doctype-row").html(html);
+		const payment = this.choice_group(
+			__("Payment"),
+			["All", "Paid", "Pending"],
+			this.state.status,
+			"status"
+		);
+		const delivery = this.choice_group(
+			__("Delivery"),
+			["All", "Delivered", "Pending"],
+			this.state.delivery_status,
+			"delivery"
+		);
+		this.$root.find(".spa-doctype-row").html(doctypes + payment + delivery);
 	}
 
-	render_statuses() {
-		const html = ["Pending", "Paid", "All"]
-			.map((status) => {
-				const selected = this.state.status === status ? "is-selected" : "";
-				return `<button type="button" class="spa-chip ${selected}" data-status="${status}" aria-pressed="${
-					this.state.status === status
-				}">${__(status)}</button>`;
+	choice_group(label, values, selected, attr) {
+		const chips = values
+			.map((value) => {
+				const is_selected = selected === value;
+				return `<button type="button" class="spa-chip ${
+					is_selected ? "is-selected" : ""
+				}" data-${attr}="${value}" aria-pressed="${is_selected}">${__(value)}</button>`;
 			})
 			.join("");
-		this.$root.find(".spa-status-row").html(html);
+		return `<span class="spa-filter-group"><span class="spa-filter-label">${frappe.utils.escape_html(
+			label
+		)}:</span>${chips}</span>`;
 	}
 
 	render_sales_persons() {
@@ -534,6 +559,7 @@ class SalesPersonWiseAnalysis {
 		return {
 			doctype: this.state.doctype,
 			status: this.state.status,
+			delivery_status: this.state.delivery_status,
 			year: cint(this.state.year),
 			half: this.state.half,
 			quarter: this.state.quarter,
@@ -673,6 +699,7 @@ class SalesPersonWiseAnalysis {
 			...this.state,
 			doctype: "Sales Invoice",
 			status: "All",
+			delivery_status: "All",
 			sales_persons: [],
 			year: String(new Date().getFullYear()),
 			half: "All",

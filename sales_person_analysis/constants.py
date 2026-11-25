@@ -21,7 +21,14 @@ ALLOWED_DOCTYPES = ("Sales Invoice", "Sales Order")
 STATUS_PENDING = "Pending"
 STATUS_PAID = "Paid"
 STATUS_ALL = "All"
-DOCUMENT_STATUSES = (STATUS_PENDING, STATUS_PAID, STATUS_ALL)
+DOCUMENT_STATUSES = (STATUS_ALL, STATUS_PAID, STATUS_PENDING)
+
+# Delivery filter on the same submitted documents.
+# Pending: stock still to deliver. Delivered: nothing left to deliver. All: both.
+DELIVERY_ALL = "All"
+DELIVERY_DELIVERED = "Delivered"
+DELIVERY_PENDING = "Pending"
+DELIVERY_STATUSES = (DELIVERY_ALL, DELIVERY_DELIVERED, DELIVERY_PENDING)
 DEFAULT_PAGE_SIZE = 20
 MAX_EXPORT_ROWS = 10000
 VISIBLE_CHIP_COUNT = 8

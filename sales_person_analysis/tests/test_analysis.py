@@ -349,6 +349,134 @@ class TestAnalysisAPI(IntegrationTestCase):
 			places=2,
 		)
 
+	def test_delivery_status_splits_invoices_and_orders(self):
+		_item, customer = self._require_setup()
+		item = frappe.db.get_value(
+			"Item",
+			{"disabled": 0, "is_sales_item": 1, "is_stock_item": 1, "has_variants": 0},
+			["name", "item_group"],
+			as_dict=True,
+		)
+		if not item:
+			self.skipTest("Need a stock Item")
+		sp = tu.ensure_sales_person("_SPA Cov Delivery")
+		posting_date = add_days(today(), -2)
+
+		pending_invoice = tu.make_si(
+			company_name=self.company,
+			customer=customer,
+			item=item.name,
+			posting_date=posting_date,
+			qty=2,
+			rate=100,
+			sales_persons=[sp],
+		)
+		delivered_invoice = tu.make_si(
+			company_name=self.company,
+			customer=customer,
+			item=item.name,
+			posting_date=posting_date,
+			qty=1,
+			rate=50,
+			sales_persons=[sp],
+		)
+		invoice_item = frappe.db.get_value(
+			"Sales Invoice Item", {"parent": delivered_invoice.name}, "name"
+		)
+		frappe.db.set_value("Sales Invoice Item", invoice_item, "delivered_qty", 1)
+		stock_invoice = tu.make_si(
+			company_name=self.company,
+			customer=customer,
+			item=item.name,
+			posting_date=posting_date,
+			qty=1,
+			rate=25,
+			sales_persons=[sp],
+		)
+		frappe.db.set_value("Sales Invoice", stock_invoice.name, "update_stock", 1)
+
+		open_order = tu.make_so(
+			company_name=self.company,
+			customer=customer,
+			item=item.name,
+			transaction_date=posting_date,
+			qty=1,
+			rate=80,
+			sales_persons=[sp],
+		)
+		frappe.db.set_value(
+			"Sales Order",
+			open_order.name,
+			{"delivery_status": "Not Delivered", "per_delivered": 0, "skip_delivery_note": 0},
+		)
+		delivered_order = tu.make_so(
+			company_name=self.company,
+			customer=customer,
+			item=item.name,
+			transaction_date=posting_date,
+			qty=1,
+			rate=40,
+			sales_persons=[sp],
+		)
+		frappe.db.set_value(
+			"Sales Order",
+			delivered_order.name,
+			{"delivery_status": "Fully Delivered", "per_delivered": 100},
+		)
+		skip_order = tu.make_so(
+			company_name=self.company,
+			customer=customer,
+			item=item.name,
+			transaction_date=posting_date,
+			qty=1,
+			rate=15,
+			sales_persons=[sp],
+		)
+		frappe.db.set_value(
+			"Sales Order",
+			skip_order.name,
+			{"delivery_status": "Not Delivered", "per_delivered": 0, "skip_delivery_note": 1},
+		)
+
+		for name, doctype in (
+			(pending_invoice.name, "Sales Invoice"),
+			(delivered_invoice.name, "Sales Invoice"),
+			(stock_invoice.name, "Sales Invoice"),
+			(open_order.name, "Sales Order"),
+			(delivered_order.name, "Sales Order"),
+			(skip_order.name, "Sales Order"),
+		):
+			self.addCleanup(lambda n=name, dt=doctype: tu.cancel_and_delete(dt, n))
+
+		filters = {
+			"year": getdate(posting_date).year,
+			"sales_persons": [sp],
+			"page": 1,
+			"page_size": 50,
+		}
+
+		def amount(doctype, delivery_status):
+			result = get_customer_wise_sales(
+				{"doctype": doctype, "delivery_status": delivery_status, **filters}
+			)
+			self.assertEqual(result["delivery_status"], delivery_status)
+			return flt(tu.amount_for_customer(result, customer) or 0)
+
+		invoice_pending = flt(pending_invoice.base_grand_total)
+		invoice_delivered = flt(delivered_invoice.base_grand_total) + flt(stock_invoice.base_grand_total)
+		self.assertAlmostEqual(amount("Sales Invoice", "Pending"), invoice_pending, places=2)
+		self.assertAlmostEqual(amount("Sales Invoice", "Delivered"), invoice_delivered, places=2)
+		self.assertAlmostEqual(
+			amount("Sales Invoice", "All"), invoice_pending + invoice_delivered, places=2
+		)
+
+		self.assertAlmostEqual(amount("Sales Order", "Pending"), flt(open_order.base_grand_total), places=2)
+		self.assertAlmostEqual(
+			amount("Sales Order", "Delivered"),
+			flt(delivered_order.base_grand_total) + flt(skip_order.base_grand_total),
+			places=2,
+		)
+
 	def test_pending_excludes_cancelled(self):
 		item, customer = self._require_setup()
 		sp = tu.ensure_sales_person("_SPA Cov Pending Cancel")
