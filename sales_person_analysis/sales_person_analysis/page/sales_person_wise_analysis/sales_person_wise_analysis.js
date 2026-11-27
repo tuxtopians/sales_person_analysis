@@ -709,10 +709,11 @@ class SalesPersonWiseAnalysis {
 		switch (this.state.group_by) {
 			case "Invoice": {
 				const route = this.state.doctype === "Sales Order" ? "sales-order" : "sales-invoice";
-				const invoice = frappe.utils.escape_html(row.invoice || "");
+				const invoice_id = row.invoice || row.name || "";
+				const invoice = frappe.utils.escape_html(invoice_id);
 				const customer_name = frappe.utils.escape_html(row.customer_name || row.customer || "");
-				const invoice_cell = row.invoice
-					? `<a href="/app/${route}/${encodeURIComponent(row.invoice)}">${invoice}</a>`
+				const invoice_cell = invoice_id
+					? `<a href="/app/${route}/${encodeURIComponent(invoice_id)}">${invoice}</a>`
 					: invoice;
 				const customer_cell = row.customer
 					? `<a href="/app/customer/${encodeURIComponent(row.customer)}">${customer_name}</a>`
@@ -720,16 +721,18 @@ class SalesPersonWiseAnalysis {
 				return [invoice_cell, customer_cell];
 			}
 			case "Item": {
-				const name = frappe.utils.escape_html(row.item_name || row.item || "");
+				const item_id = row.item || row.item_code || "";
+				const name = frappe.utils.escape_html(row.item_name || item_id);
 				return [
-					row.item ? `<a href="/app/item/${encodeURIComponent(row.item)}">${name}</a>` : name,
+					item_id ? `<a href="/app/item/${encodeURIComponent(item_id)}">${name}</a>` : name,
 				];
 			}
 			case "Item Group": {
-				const name = frappe.utils.escape_html(row.item_group || "");
+				const group_id = row.item_group || "";
+				const name = frappe.utils.escape_html(group_id);
 				return [
-					row.item_group
-						? `<a href="/app/item-group/${encodeURIComponent(row.item_group)}">${name}</a>`
+					group_id
+						? `<a href="/app/item-group/${encodeURIComponent(group_id)}">${name}</a>`
 						: name,
 				];
 			}

@@ -359,30 +359,30 @@ def _group_spec(group_by: str):
 	if group_by == GROUP_INVOICE:
 		return frappe._dict(
 			select=(
-				"doc.name AS invoice, doc.customer AS customer, "
+				"doc.name AS name, doc.name AS invoice, doc.customer AS customer, "
 				"MAX(doc.customer_name) AS customer_name, SUM({amount}) AS amount"
 			),
 			group="doc.name, doc.customer",
-			order="amount DESC, invoice ASC",
+			order="amount DESC, name ASC",
 			count_group="doc.name",
 		)
 	if group_by == GROUP_ITEM:
 		return frappe._dict(
 			select=(
-				"item_row.item_code AS item, "
-				"MAX(IFNULL(item_row.item_name, item.item_name)) AS item_name, "
+				"item_row.item_code AS item_code, item_row.item_code AS item, "
+				"MAX(IFNULL(NULLIF(item_row.item_name, ''), item.item_name)) AS item_name, "
 				"SUM({amount}) AS amount"
 			),
 			group="item_row.item_code",
-			order="amount DESC, item_name ASC",
+			order="amount DESC, item_code ASC",
 			count_group="item_row.item_code",
 		)
 	if group_by == GROUP_ITEM_GROUP:
 		return frappe._dict(
-			select="item.item_group AS item_group, SUM({amount}) AS amount",
-			group="item.item_group",
+			select=("IFNULL(item_row.item_group, item.item_group) AS item_group, SUM({amount}) AS amount"),
+			group="IFNULL(item_row.item_group, item.item_group)",
 			order="amount DESC, item_group ASC",
-			count_group="item.item_group",
+			count_group="IFNULL(item_row.item_group, item.item_group)",
 		)
 	return frappe._dict(
 		select=("doc.customer AS customer, MAX(doc.customer_name) AS customer_name, SUM({amount}) AS amount"),
@@ -812,7 +812,7 @@ def _query_grouped_sql(from_sql, conditions, values, amount_sql, page, page_size
 		values,
 		as_dict=True,
 	)
-	return _format_rows(rows), grand_total, group_count
+	return _format_rows(rows, group_by), grand_total, group_count
 
 
 def _limit_clause(values, page, page_size, export, customer_count):
@@ -823,19 +823,44 @@ def _limit_clause(values, page, page_size, export, customer_count):
 	return "LIMIT %(limit)s OFFSET %(offset)s", values
 
 
-def _format_rows(rows):
+def _row_as_dict(row) -> frappe._dict:
+	if not isinstance(row, dict):
+		return frappe._dict(row)
+	return frappe._dict({(k.decode() if isinstance(k, bytes) else k): v for k, v in row.items()})
+
+
+def _row_val(row, *keys):
+	"""First non-empty value among SQL aliases (invoice vs name, item vs item_code)."""
+	row = _row_as_dict(row)
+	for key in keys:
+		val = row.get(key)
+		if val not in (None, ""):
+			return val
+	return None
+
+
+def _format_rows(rows, group_by=GROUP_CUSTOMER):
+	group_by = _validate_group_by(group_by)
 	formatted = []
 	for row in rows:
+		row = _row_as_dict(row)
 		out = {"amount": flt(row.get("amount"))}
-		if "invoice" in row:
-			out["invoice"] = row.get("invoice")
-		if "customer" in row or "customer_name" in row:
-			out["customer"] = row.get("customer")
-			out["customer_name"] = row.get("customer_name") or row.get("customer") or _("(No Customer)")
-		if "item" in row:
-			out["item"] = row.get("item")
-			out["item_name"] = row.get("item_name") or row.get("item") or _("(No Item)")
-		if "item_group" in row:
-			out["item_group"] = row.get("item_group") or _("(No Item Group)")
+		invoice = _row_val(row, "invoice", "name")
+		customer = _row_val(row, "customer")
+		customer_name = _row_val(row, "customer_name", "customer")
+		item = _row_val(row, "item", "item_code")
+		item_name = _row_val(row, "item_name", "item", "item_code")
+		item_group = _row_val(row, "item_group")
+
+		if group_by == GROUP_INVOICE or invoice:
+			out["invoice"] = invoice or ""
+		if group_by in (GROUP_CUSTOMER, GROUP_INVOICE) or customer or customer_name:
+			out["customer"] = customer
+			out["customer_name"] = customer_name or customer or _("(No Customer)")
+		if group_by == GROUP_ITEM or item or item_name:
+			out["item"] = item or ""
+			out["item_name"] = item_name or item or _("(No Item)")
+		if group_by == GROUP_ITEM_GROUP or item_group is not None:
+			out["item_group"] = item_group or _("(No Item Group)")
 		formatted.append(out)
 	return formatted

@@ -81,15 +81,31 @@ class TestApiHelpers(UnitTestCase):
 
 	def test_format_rows_invoice_and_item(self):
 		invoice_rows = analysis_mod._format_rows(
-			[frappe_dict(invoice="SINV-1", customer="C1", customer_name="Alpha", amount=25)]
+			[frappe_dict(invoice="SINV-1", customer="C1", customer_name="Alpha", amount=25)],
+			"Invoice",
 		)
 		self.assertEqual(invoice_rows[0]["invoice"], "SINV-1")
 		self.assertEqual(invoice_rows[0]["customer_name"], "Alpha")
-		item_rows = analysis_mod._format_rows([frappe_dict(item="ITEM-1", item_name=None, amount=8)])
+		item_rows = analysis_mod._format_rows([frappe_dict(item="ITEM-1", item_name=None, amount=8)], "Item")
 		self.assertEqual(item_rows[0]["item"], "ITEM-1")
 		self.assertEqual(item_rows[0]["item_name"], "ITEM-1")
-		group_rows = analysis_mod._format_rows([frappe_dict(item_group=None, amount=3)])
+		group_rows = analysis_mod._format_rows([frappe_dict(item_group=None, amount=3)], "Item Group")
 		self.assertEqual(group_rows[0]["item_group"], "(No Item Group)")
+
+	def test_format_rows_sql_alias_fallbacks(self):
+		"""MariaDB may return name/item_code instead of the AS aliases."""
+		invoice_rows = analysis_mod._format_rows(
+			[frappe_dict(name="ACC-SINV-2026-00001", customer="C1", customer_name="Alpha", amount=25)],
+			"Invoice",
+		)
+		self.assertEqual(invoice_rows[0]["invoice"], "ACC-SINV-2026-00001")
+		item_rows = analysis_mod._format_rows(
+			[frappe_dict(item_code="SKU-1", item_name="Widget", amount=8)], "Item"
+		)
+		self.assertEqual(item_rows[0]["item"], "SKU-1")
+		self.assertEqual(item_rows[0]["item_name"], "Widget")
+		group_rows = analysis_mod._format_rows([frappe_dict(item_group="Products", amount=3)], "Item Group")
+		self.assertEqual(group_rows[0]["item_group"], "Products")
 
 	def test_export_filename_is_short_and_safe(self):
 		name = analysis_mod._export_filename("Sales Invoice", 2026)
@@ -551,8 +567,8 @@ class TestApiHelpers(UnitTestCase):
 				"Item Group",
 			)
 		joined = " ".join(captured)
-		self.assertIn("item.item_group AS item_group", joined)
-		self.assertIn("GROUP BY item.item_group", joined)
+		self.assertIn("item_row.item_group, item.item_group) AS item_group", joined)
+		self.assertIn("GROUP BY IFNULL(item_row.item_group, item.item_group)", joined)
 		self.assertIn("item.item_group IN %(item_groups)s", joined)
 
 
