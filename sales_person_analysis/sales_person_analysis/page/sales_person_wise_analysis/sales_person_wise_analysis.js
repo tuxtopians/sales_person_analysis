@@ -717,32 +717,13 @@ class SalesPersonWiseAnalysis {
 		if (loaded !== false) this.refresh();
 	}
 
-	async export_csv() {
-		try {
-			frappe.dom.freeze(__("Exporting..."));
-			const message = await frappe.xcall(
-				"sales_person_analysis.api.analysis.get_customer_wise_sales",
-				{ filters: this.get_filters({ export: 1, page: 1 }) }
-			);
-			const currency = message.currency || this.options.currency || "";
-			const amount_header = currency
-				? `${__("Sales Amount incl. VAT")} (${currency})`
-				: __("Sales Amount incl. VAT");
-			const rows = [[__("Customer"), amount_header]];
-			(message.rows || []).forEach((row) => {
-				rows.push([row.customer_name || row.customer || "", flt(row.amount)]);
-			});
-			rows.push([__("Grand Total (incl. VAT)"), flt(message.grand_total)]);
-			frappe.tools.downloadify([], null, rows, "Sales_Person_Wise_Analysis");
-		} catch (err) {
-			console.error(err);
-			frappe.show_alert({
-				message: server_message(err, __("Export failed")),
-				indicator: "red",
-			});
-		} finally {
-			frappe.dom.unfreeze();
-		}
+	export_csv() {
+		// Server Excel download. downloadify(data, roles, title) names the file
+		// "{title}.csv"; passing the result rows as title made Excel refuse to
+		// open a path built from every customer and amount.
+		open_url_post("/api/method/sales_person_analysis.api.analysis.export_customer_wise_sales", {
+			filters: JSON.stringify(this.get_filters({ export: 1, page: 1 })),
+		});
 	}
 }
 
