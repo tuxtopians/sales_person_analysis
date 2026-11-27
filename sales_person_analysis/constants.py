@@ -31,6 +31,8 @@ DELIVERY_PENDING = "Pending"
 DELIVERY_STATUSES = (DELIVERY_ALL, DELIVERY_DELIVERED, DELIVERY_PENDING)
 DEFAULT_PAGE_SIZE = 20
 MAX_EXPORT_ROWS = 10000
+# Excel/Windows fail when the download name is the whole report (MAX_PATH).
+MAX_EXPORT_FILENAME = 80
 VISIBLE_CHIP_COUNT = 8
 
 # MariaDB DAYOFWEEK: 1=Sunday, 2=Monday, ..., 7=Saturday.

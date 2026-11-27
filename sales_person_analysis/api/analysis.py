@@ -42,6 +42,8 @@ Amount rules
 
 from __future__ import annotations
 
+import re
+
 import frappe
 from frappe import _
 from frappe.utils import cint, flt, getdate
@@ -65,6 +67,7 @@ from sales_person_analysis.constants import (
 	DELIVERY_PENDING,
 	DELIVERY_STATUSES,
 	DOCUMENT_STATUSES,
+	MAX_EXPORT_FILENAME,
 	MAX_EXPORT_ROWS,
 	STATUS_ALL,
 	STATUS_PAID,
@@ -195,6 +198,59 @@ def get_customer_wise_sales(filters=None):
 		"page_size": page_size if not export else len(rows),
 		"total_pages": max(1, (cint(customer_count) + page_size - 1) // page_size) if page_size else 1,
 	}
+
+
+@frappe.whitelist()
+def export_customer_wise_sales(filters=None):
+	"""Download the customer-wise report as a short-named Excel workbook.
+
+	The desk page used to pass the result rows as downloadify's title, so the
+	saved file was named after every customer and amount. Excel will not open
+	that. This method keeps the name to SPA_<Doctype>_<Year>.xlsx and puts the
+	rows in the workbook.
+	"""
+	parsed = frappe.parse_json(filters) if isinstance(filters, str) else (filters or {})
+	parsed = frappe._dict(parsed)
+	parsed["export"] = 1
+	parsed["page"] = 1
+	data = get_customer_wise_sales(parsed)
+
+	from frappe.utils.xlsxutils import make_xlsx
+
+	xlsx_file = make_xlsx(_excel_rows(data), _("Sales Person Analysis"))
+	frappe.response["filename"] = _export_filename(data.get("doctype"), parsed.get("year"))
+	frappe.response["filecontent"] = xlsx_file.getvalue()
+	frappe.response["type"] = "binary"
+
+
+def _export_filename(doctype: str | None = None, year=None) -> str:
+	"""Short, filesystem-safe .xlsx name. Report data must never go in here."""
+	parts = ["SPA"]
+	slug = re.sub(r"[^A-Za-z0-9]+", "_", str(doctype or "").strip()).strip("_")
+	if slug:
+		parts.append(slug)
+	year_num = cint(year)
+	if year_num:
+		parts.append(str(year_num))
+	stem = "_".join(parts) or "SPA"
+	max_stem = max(1, MAX_EXPORT_FILENAME - len(".xlsx"))
+	stem = stem[:max_stem].rstrip("._") or "SPA"
+	return f"{stem}.xlsx"
+
+
+def _excel_rows(data) -> list:
+	"""Two-column sheet: customer, VAT-inclusive amount, then grand total."""
+	data = data or {}
+	currency = data.get("currency") or ""
+	amount_header = _("Sales Amount incl. VAT")
+	if currency:
+		amount_header = f"{amount_header} ({currency})"
+	rows = [[_("Customer"), amount_header]]
+	for row in data.get("rows") or []:
+		name = row.get("customer_name") or row.get("customer") or ""
+		rows.append([name, flt(row.get("amount"))])
+	rows.append([_("Grand Total (incl. VAT)"), flt(data.get("grand_total"))])
+	return rows
 
 
 def _empty_result(

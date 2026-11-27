@@ -8,11 +8,13 @@ from frappe.tests import IntegrationTestCase
 from frappe.utils import add_days, flt, getdate, today
 
 from sales_person_analysis.api.analysis import (
+	export_customer_wise_sales,
 	get_customer_wise_sales,
 	get_filter_options,
 	get_period_options,
 	inclusive_line_amount,
 )
+from sales_person_analysis.constants import MAX_EXPORT_FILENAME
 from sales_person_analysis.api.period import week_of_month, week_of_month_sql
 from sales_person_analysis.tests import utils as tu
 
@@ -1028,3 +1030,15 @@ class TestAnalysisAPI(IntegrationTestCase):
 		)
 		self.assertEqual(result_zero["page"], 1)
 		self.assertGreaterEqual(result_zero["page_size"], 1)
+
+	def test_excel_export_uses_short_xlsx_filename(self):
+		if not self.company:
+			self.skipTest("No company configured")
+		year = getdate().year
+		export_customer_wise_sales({"doctype": "Sales Invoice", "year": year})
+		filename = frappe.response["filename"]
+		self.assertEqual(filename, f"SPA_Sales_Invoice_{year}.xlsx")
+		self.assertLessEqual(len(filename), MAX_EXPORT_FILENAME)
+		self.assertNotIn(",", filename)
+		content = frappe.response["filecontent"]
+		self.assertTrue(isinstance(content, bytes | bytearray) and content[:2] == b"PK")

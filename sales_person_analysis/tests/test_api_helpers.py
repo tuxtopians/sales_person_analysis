@@ -9,7 +9,7 @@ from frappe.utils import flt
 from sales_person_analysis.api import analysis as analysis_mod
 from sales_person_analysis.api.analysis import DOCTYPE_META
 from sales_person_analysis.api.period import week_of_month_sql
-from sales_person_analysis.constants import MAX_EXPORT_ROWS, WEEK_START_DAYOFWEEK
+from sales_person_analysis.constants import MAX_EXPORT_FILENAME, MAX_EXPORT_ROWS, WEEK_START_DAYOFWEEK
 
 
 class TestApiHelpers(UnitTestCase):
@@ -63,6 +63,40 @@ class TestApiHelpers(UnitTestCase):
 		self.assertEqual(flt(rows[0]["amount"]), 10.5)
 		self.assertEqual(rows[1]["customer_name"], "C2")
 		self.assertEqual(flt(rows[1]["amount"]), 0.0)
+
+	def test_export_filename_is_short_and_safe(self):
+		name = analysis_mod._export_filename("Sales Invoice", 2026)
+		self.assertEqual(name, "SPA_Sales_Invoice_2026.xlsx")
+		self.assertLessEqual(len(name), MAX_EXPORT_FILENAME)
+		for ch in '\\/:*?"<>|,':
+			self.assertNotIn(ch, name)
+
+		long_name = analysis_mod._export_filename("X" * 200, 2026)
+		self.assertTrue(long_name.endswith(".xlsx"))
+		self.assertLessEqual(len(long_name), MAX_EXPORT_FILENAME)
+
+		# Customer rows used to become the download title. They must not.
+		self.assertNotIn("Alpha Trading", analysis_mod._export_filename("Sales Invoice", 2026))
+
+	def test_excel_rows_include_header_customers_and_total(self):
+		rows = analysis_mod._excel_rows(
+			{
+				"currency": "AED",
+				"rows": [
+					{"customer": "C1", "customer_name": "Alpha", "amount": 10},
+					{"customer": "C2", "customer_name": "", "amount": 2.5},
+				],
+				"grand_total": 12.5,
+			}
+		)
+		self.assertEqual(rows[0][0], "Customer")
+		self.assertIn("AED", rows[0][1])
+		self.assertEqual(rows[1], ["Alpha", 10.0])
+		self.assertEqual(rows[2][0], "C2")
+		self.assertEqual(flt(rows[2][1]), 2.5)
+		self.assertEqual(rows[-1][0], "Grand Total (incl. VAT)")
+		self.assertEqual(flt(rows[-1][1]), 12.5)
+		self.assertEqual(len(rows), 4)
 
 	def test_base_conditions_include_submitted_returns(self):
 		meta = DOCTYPE_META["Sales Invoice"]
