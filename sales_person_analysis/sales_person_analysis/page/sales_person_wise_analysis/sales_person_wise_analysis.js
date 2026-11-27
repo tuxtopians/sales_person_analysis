@@ -23,6 +23,7 @@ class SalesPersonWiseAnalysis {
 			doctype: "Sales Invoice",
 			status: "All",
 			delivery_status: "All",
+			group_by: "Customer",
 			sales_persons: [],
 			year: String(new Date().getFullYear()),
 			half: "All",
@@ -88,12 +89,15 @@ class SalesPersonWiseAnalysis {
 			<div class="spa-table-section">
 				<div class="spa-table-header">
 					<div class="spa-table-title">
-						<span>${__("Customer Wise Sales")}</span>
+						<span class="spa-group-title">${__("Customer Wise Sales")}</span>
 						<span class="spa-count-badge spa-count">0 ${__("customers")}</span>
 					</div>
-					<button type="button" class="btn btn-default btn-sm spa-export-btn">
-						<span class="octicon octicon-desktop-download"></span> ${__("Export")}
-					</button>
+					<div class="spa-table-header-actions">
+						<fieldset class="spa-group-by"></fieldset>
+						<button type="button" class="btn btn-default btn-sm spa-export-btn">
+							<span class="octicon octicon-desktop-download"></span> ${__("Export")}
+						</button>
+					</div>
 				</div>
 				<div class="spa-table-body"></div>
 				<div class="spa-table-footer">
@@ -108,6 +112,7 @@ class SalesPersonWiseAnalysis {
 
 		this.$root.find(".spa-export-btn").on("click", () => this.export_csv());
 		this.bind_filter_events();
+		this.render_group_by();
 		this.render_filters();
 		this.render_table();
 	}
@@ -249,6 +254,15 @@ class SalesPersonWiseAnalysis {
 			this.state.page = page;
 			this.refresh();
 		});
+
+		this.$root.on("change", "input[name='spa-group-by']", (e) => {
+			const group_by = String($(e.currentTarget).val() || "");
+			if (!group_by || group_by === this.state.group_by) return;
+			this.state.group_by = group_by;
+			this.state.page = 1;
+			this.$root.find(".spa-group-title").text(this.group_title());
+			this.refresh();
+		});
 	}
 
 	toggle_list(list, value) {
@@ -328,6 +342,66 @@ class SalesPersonWiseAnalysis {
 		this.render_months();
 		this.render_weeks();
 		this.render_item_groups();
+		this.render_group_by();
+	}
+
+	group_by_options() {
+		const invoice_label = this.state.doctype === "Sales Order" ? __("Order") : __("Invoice");
+		return [
+			{ value: "Invoice", label: invoice_label },
+			{ value: "Customer", label: __("Customer") },
+			{ value: "Item", label: __("Item") },
+			{ value: "Item Group", label: __("Item Group") },
+		];
+	}
+
+	group_title() {
+		switch (this.state.group_by) {
+			case "Invoice":
+				return this.state.doctype === "Sales Order"
+					? __("Order Wise Sales")
+					: __("Invoice Wise Sales");
+			case "Item":
+				return __("Item Wise Sales");
+			case "Item Group":
+				return __("Item Group Wise Sales");
+			default:
+				return __("Customer Wise Sales");
+		}
+	}
+
+	group_count_text(count) {
+		switch (this.state.group_by) {
+			case "Invoice":
+				if (this.state.doctype === "Sales Order") {
+					return `${count} ${count === 1 ? __("order") : __("orders")}`;
+				}
+				return `${count} ${count === 1 ? __("invoice") : __("invoices")}`;
+			case "Item":
+				return `${count} ${count === 1 ? __("item") : __("items")}`;
+			case "Item Group":
+				return `${count} ${count === 1 ? __("item group") : __("item groups")}`;
+			default:
+				return `${count} ${count === 1 ? __("customer") : __("customers")}`;
+		}
+	}
+
+	render_group_by() {
+		const options = this.group_by_options()
+			.map((opt) => {
+				const checked = this.state.group_by === opt.value ? "checked" : "";
+				return `<label class="spa-radio">
+					<input type="radio" name="spa-group-by" value="${frappe.utils.escape_html(
+						opt.value
+					)}" ${checked}>
+					${frappe.utils.escape_html(opt.label)}
+				</label>`;
+			})
+			.join("");
+		this.$root.find(".spa-group-by").html(
+			`<legend class="spa-group-by-legend">${__("Group by")}</legend>${options}`
+		);
+		this.$root.find(".spa-group-title").text(this.group_title());
 	}
 
 	render_doctypes() {
@@ -560,6 +634,7 @@ class SalesPersonWiseAnalysis {
 			doctype: this.state.doctype,
 			status: this.state.status,
 			delivery_status: this.state.delivery_status,
+			group_by: this.state.group_by,
 			year: cint(this.state.year),
 			half: this.state.half,
 			quarter: this.state.quarter,
@@ -613,10 +688,67 @@ class SalesPersonWiseAnalysis {
 		this.$root.find(".spa-table-body").html(`<div class="spa-loading">${__("Loading...")}</div>`);
 	}
 
+	table_identity_headers(amount_label) {
+		switch (this.state.group_by) {
+			case "Invoice":
+				return [
+					this.state.doctype === "Sales Order" ? __("Order") : __("Invoice"),
+					__("Customer"),
+					amount_label,
+				];
+			case "Item":
+				return [__("Item"), amount_label];
+			case "Item Group":
+				return [__("Item Group"), amount_label];
+			default:
+				return [__("Customer"), amount_label];
+		}
+	}
+
+	table_identity_cells(row) {
+		switch (this.state.group_by) {
+			case "Invoice": {
+				const route = this.state.doctype === "Sales Order" ? "sales-order" : "sales-invoice";
+				const invoice = frappe.utils.escape_html(row.invoice || "");
+				const customer_name = frappe.utils.escape_html(row.customer_name || row.customer || "");
+				const invoice_cell = row.invoice
+					? `<a href="/app/${route}/${encodeURIComponent(row.invoice)}">${invoice}</a>`
+					: invoice;
+				const customer_cell = row.customer
+					? `<a href="/app/customer/${encodeURIComponent(row.customer)}">${customer_name}</a>`
+					: customer_name;
+				return [invoice_cell, customer_cell];
+			}
+			case "Item": {
+				const name = frappe.utils.escape_html(row.item_name || row.item || "");
+				return [
+					row.item ? `<a href="/app/item/${encodeURIComponent(row.item)}">${name}</a>` : name,
+				];
+			}
+			case "Item Group": {
+				const name = frappe.utils.escape_html(row.item_group || "");
+				return [
+					row.item_group
+						? `<a href="/app/item-group/${encodeURIComponent(row.item_group)}">${name}</a>`
+						: name,
+				];
+			}
+			default: {
+				const customer_name = frappe.utils.escape_html(row.customer_name || row.customer || "");
+				return [
+					row.customer
+						? `<a href="/app/customer/${encodeURIComponent(row.customer)}">${customer_name}</a>`
+						: customer_name,
+				];
+			}
+		}
+	}
+
 	render_table() {
 		const currency = this.data.currency || this.options.currency || "";
 		const count = cint(this.data.customer_count);
-		this.$root.find(".spa-count").text(`${count} ${count === 1 ? __("customer") : __("customers")}`);
+		this.$root.find(".spa-group-title").text(this.group_title());
+		this.$root.find(".spa-count").text(this.group_count_text(count));
 		this.$root
 			.find(".spa-grand-total .spa-amount")
 			.text(format_currency(flt(this.data.grand_total), currency));
@@ -636,14 +768,22 @@ class SalesPersonWiseAnalysis {
 			? `${__("Sales Amount incl. VAT")} (${frappe.utils.escape_html(currency)})`
 			: __("Sales Amount incl. VAT");
 		const start = (cint(this.data.page) - 1) * cint(this.data.page_size || this.page_size);
+		const headers = this.table_identity_headers(amount_label);
+		const header_html = headers
+			.map((label, idx) => {
+				const amount_class = idx === headers.length - 1 ? " class=\"spa-col-amount\"" : "";
+				return `<th${amount_class}>${label}</th>`;
+			})
+			.join("");
 
 		const body = rows
 			.map((row, idx) => {
-				const customer = frappe.utils.escape_html(row.customer || "");
-				const customer_name = frappe.utils.escape_html(row.customer_name || row.customer || "");
+				const cells = this.table_identity_cells(row)
+					.map((cell) => `<td>${cell}</td>`)
+					.join("");
 				return `<tr>
 					<td class="spa-col-num">${start + idx + 1}</td>
-					<td><a href="/app/customer/${encodeURIComponent(row.customer)}">${customer_name}</a></td>
+					${cells}
 					<td class="spa-col-amount">${format_currency(flt(row.amount), currency)}</td>
 				</tr>`;
 			})
@@ -655,8 +795,7 @@ class SalesPersonWiseAnalysis {
 					<thead>
 						<tr>
 							<th class="spa-col-num">#</th>
-							<th>${__("Customer")}</th>
-							<th class="spa-col-amount">${amount_label}</th>
+							${header_html}
 						</tr>
 					</thead>
 					<tbody>${body}</tbody>
@@ -700,6 +839,7 @@ class SalesPersonWiseAnalysis {
 			doctype: "Sales Invoice",
 			status: "All",
 			delivery_status: "All",
+			group_by: "Customer",
 			sales_persons: [],
 			year: String(new Date().getFullYear()),
 			half: "All",

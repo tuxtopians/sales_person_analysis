@@ -14,8 +14,8 @@ from sales_person_analysis.api.analysis import (
 	get_period_options,
 	inclusive_line_amount,
 )
-from sales_person_analysis.constants import MAX_EXPORT_FILENAME
 from sales_person_analysis.api.period import week_of_month, week_of_month_sql
+from sales_person_analysis.constants import MAX_EXPORT_FILENAME
 from sales_person_analysis.tests import utils as tu
 
 
@@ -68,6 +68,12 @@ class TestAnalysisAPI(IntegrationTestCase):
 		with self.assertRaises(frappe.ValidationError):
 			get_customer_wise_sales({"doctype": "Purchase Invoice", "year": getdate().year})
 
+	def test_invalid_group_by(self):
+		with self.assertRaises(frappe.ValidationError):
+			get_customer_wise_sales(
+				{"doctype": "Sales Invoice", "year": getdate().year, "group_by": "Warehouse"}
+			)
+
 	def test_year_required(self):
 		with self.assertRaises(frappe.ValidationError):
 			get_customer_wise_sales({"doctype": "Sales Invoice"})
@@ -116,6 +122,7 @@ class TestAnalysisAPI(IntegrationTestCase):
 		self.assertEqual(result["grand_total"], 0)
 		self.assertEqual(result["customer_count"], 0)
 		self.assertEqual(result["doctype"], "Sales Invoice")
+		self.assertEqual(result["group_by"], "Customer")
 
 	def test_contradictory_period_empty(self):
 		if not self.company:
@@ -382,9 +389,7 @@ class TestAnalysisAPI(IntegrationTestCase):
 			rate=50,
 			sales_persons=[sp],
 		)
-		invoice_item = frappe.db.get_value(
-			"Sales Invoice Item", {"parent": delivered_invoice.name}, "name"
-		)
+		invoice_item = frappe.db.get_value("Sales Invoice Item", {"parent": delivered_invoice.name}, "name")
 		frappe.db.set_value("Sales Invoice Item", invoice_item, "delivered_qty", 1)
 		stock_invoice = tu.make_si(
 			company_name=self.company,
@@ -468,9 +473,7 @@ class TestAnalysisAPI(IntegrationTestCase):
 		invoice_delivered = flt(delivered_invoice.base_grand_total) + flt(stock_invoice.base_grand_total)
 		self.assertAlmostEqual(amount("Sales Invoice", "Pending"), invoice_pending, places=2)
 		self.assertAlmostEqual(amount("Sales Invoice", "Delivered"), invoice_delivered, places=2)
-		self.assertAlmostEqual(
-			amount("Sales Invoice", "All"), invoice_pending + invoice_delivered, places=2
-		)
+		self.assertAlmostEqual(amount("Sales Invoice", "All"), invoice_pending + invoice_delivered, places=2)
 
 		self.assertAlmostEqual(amount("Sales Order", "Pending"), flt(open_order.base_grand_total), places=2)
 		self.assertAlmostEqual(
@@ -1042,3 +1045,76 @@ class TestAnalysisAPI(IntegrationTestCase):
 		self.assertNotIn(",", filename)
 		content = frappe.response["filecontent"]
 		self.assertTrue(isinstance(content, bytes | bytearray) and content[:2] == b"PK")
+
+	def test_group_by_invoice_customer_item_and_item_group(self):
+		item, customer = self._require_setup()
+		other = tu.second_item_different_group(item.item_group)
+		if not other:
+			self.skipTest("Need a second item in another group")
+		sp = tu.ensure_sales_person("_SPA GroupBy")
+		posting_date = today()
+		si = tu.make_si(
+			company_name=self.company,
+			customer=customer,
+			item=item.name,
+			posting_date=posting_date,
+			qty=1,
+			rate=100,
+			sales_persons=[sp],
+			extra_items=[{"item_code": other.name, "qty": 1, "rate": 50}],
+		)
+		self.addCleanup(lambda: tu.cancel_and_delete("Sales Invoice", si.name))
+
+		filters = {
+			"doctype": "Sales Invoice",
+			"year": getdate(posting_date).year,
+			"sales_persons": [sp],
+			"page": 1,
+			"page_size": 50,
+		}
+
+		by_customer = get_customer_wise_sales({**filters, "group_by": "Customer"})
+		self.assertEqual(by_customer["group_by"], "Customer")
+		self.assertEqual(by_customer["customer_count"], 1)
+		self.assertAlmostEqual(
+			tu.amount_for_customer(by_customer, customer), flt(si.base_grand_total), places=2
+		)
+
+		by_invoice = get_customer_wise_sales({**filters, "group_by": "Invoice"})
+		self.assertEqual(by_invoice["group_by"], "Invoice")
+		self.assertEqual(by_invoice["customer_count"], 1)
+		self.assertEqual(by_invoice["rows"][0]["invoice"], si.name)
+		self.assertEqual(by_invoice["rows"][0]["customer"], customer)
+		self.assertAlmostEqual(flt(by_invoice["rows"][0]["amount"]), flt(si.base_grand_total), places=2)
+
+		by_item = get_customer_wise_sales({**filters, "group_by": "Item"})
+		self.assertEqual(by_item["group_by"], "Item")
+		item_codes = {row["item"] for row in by_item["rows"]}
+		self.assertIn(item.name, item_codes)
+		self.assertIn(other.name, item_codes)
+		self.assertAlmostEqual(
+			sum(flt(row["amount"]) for row in by_item["rows"]), flt(si.base_grand_total), places=2
+		)
+		self.assertAlmostEqual(
+			flt(next(row["amount"] for row in by_item["rows"] if row["item"] == item.name)),
+			_expected_item_amount(si, item.name),
+			places=2,
+		)
+
+		by_group = get_customer_wise_sales({**filters, "group_by": "Item Group"})
+		self.assertEqual(by_group["group_by"], "Item Group")
+		groups = {row["item_group"] for row in by_group["rows"]}
+		self.assertIn(item.item_group, groups)
+		self.assertIn(other.item_group, groups)
+		self.assertAlmostEqual(
+			sum(flt(row["amount"]) for row in by_group["rows"]), flt(si.base_grand_total), places=2
+		)
+
+		filtered = get_customer_wise_sales(
+			{**filters, "group_by": "Invoice", "item_groups": [item.item_group]}
+		)
+		self.assertEqual(filtered["rows"][0]["invoice"], si.name)
+		self.assertAlmostEqual(
+			flt(filtered["rows"][0]["amount"]), _expected_item_amount(si, item.name), places=2
+		)
+		self.assertLess(flt(filtered["rows"][0]["amount"]), flt(si.base_grand_total))

@@ -42,7 +42,7 @@ class TestApiHelpers(UnitTestCase):
 		self.assertEqual(values["offset"], 40)
 
 	def test_limit_clause_export_caps(self):
-		sql, values = analysis_mod._limit_clause({}, page=1, page_size=20, export=1, customer_count=50)
+		_, values = analysis_mod._limit_clause({}, page=1, page_size=20, export=1, customer_count=50)
 		self.assertEqual(values["limit"], 50)
 		self.assertEqual(values["offset"], 0)
 
@@ -51,6 +51,21 @@ class TestApiHelpers(UnitTestCase):
 
 		_, values = analysis_mod._limit_clause({}, page=1, page_size=20, export=1, customer_count=0)
 		self.assertEqual(values["limit"], MAX_EXPORT_ROWS)
+
+	def test_validate_group_by(self):
+		self.assertEqual(analysis_mod._validate_group_by(None), "Customer")
+		self.assertEqual(analysis_mod._validate_group_by(" Invoice "), "Invoice")
+		self.assertEqual(analysis_mod._validate_group_by("Item Group"), "Item Group")
+		with self.assertRaises(Exception):
+			analysis_mod._validate_group_by("Warehouse")
+
+	def test_uses_item_level(self):
+		self.assertFalse(analysis_mod._uses_item_level("Customer", []))
+		self.assertFalse(analysis_mod._uses_item_level("Invoice", []))
+		self.assertTrue(analysis_mod._uses_item_level("Item", []))
+		self.assertTrue(analysis_mod._uses_item_level("Item Group", []))
+		self.assertTrue(analysis_mod._uses_item_level("Customer", ["Products"]))
+		self.assertTrue(analysis_mod._uses_item_level("Invoice", ["Products"]))
 
 	def test_format_rows(self):
 		rows = analysis_mod._format_rows(
@@ -63,6 +78,18 @@ class TestApiHelpers(UnitTestCase):
 		self.assertEqual(flt(rows[0]["amount"]), 10.5)
 		self.assertEqual(rows[1]["customer_name"], "C2")
 		self.assertEqual(flt(rows[1]["amount"]), 0.0)
+
+	def test_format_rows_invoice_and_item(self):
+		invoice_rows = analysis_mod._format_rows(
+			[frappe_dict(invoice="SINV-1", customer="C1", customer_name="Alpha", amount=25)]
+		)
+		self.assertEqual(invoice_rows[0]["invoice"], "SINV-1")
+		self.assertEqual(invoice_rows[0]["customer_name"], "Alpha")
+		item_rows = analysis_mod._format_rows([frappe_dict(item="ITEM-1", item_name=None, amount=8)])
+		self.assertEqual(item_rows[0]["item"], "ITEM-1")
+		self.assertEqual(item_rows[0]["item_name"], "ITEM-1")
+		group_rows = analysis_mod._format_rows([frappe_dict(item_group=None, amount=3)])
+		self.assertEqual(group_rows[0]["item_group"], "(No Item Group)")
 
 	def test_export_filename_is_short_and_safe(self):
 		name = analysis_mod._export_filename("Sales Invoice", 2026)
@@ -97,6 +124,54 @@ class TestApiHelpers(UnitTestCase):
 		self.assertEqual(rows[-1][0], "Grand Total (incl. VAT)")
 		self.assertEqual(flt(rows[-1][1]), 12.5)
 		self.assertEqual(len(rows), 4)
+
+	def test_excel_rows_invoice_item_and_item_group(self):
+		invoice_rows = analysis_mod._excel_rows(
+			{
+				"group_by": "Invoice",
+				"doctype": "Sales Invoice",
+				"currency": "AED",
+				"rows": [
+					{"invoice": "SINV-1", "customer": "C1", "customer_name": "Alpha", "amount": 10},
+				],
+				"grand_total": 10,
+			}
+		)
+		self.assertEqual(invoice_rows[0][0], "Invoice")
+		self.assertEqual(invoice_rows[0][1], "Customer")
+		self.assertEqual(invoice_rows[1], ["SINV-1", "Alpha", 10.0])
+		self.assertEqual(invoice_rows[-1][0], "Grand Total (incl. VAT)")
+		self.assertEqual(flt(invoice_rows[-1][-1]), 10.0)
+
+		order_rows = analysis_mod._excel_rows(
+			{
+				"group_by": "Invoice",
+				"doctype": "Sales Order",
+				"rows": [{"invoice": "SO-1", "customer_name": "Beta", "amount": 4}],
+				"grand_total": 4,
+			}
+		)
+		self.assertEqual(order_rows[0][0], "Order")
+
+		item_rows = analysis_mod._excel_rows(
+			{
+				"group_by": "Item",
+				"rows": [{"item": "SKU", "item_name": "Widget", "amount": 7}],
+				"grand_total": 7,
+			}
+		)
+		self.assertEqual(item_rows[0][0], "Item")
+		self.assertEqual(item_rows[1], ["Widget", 7.0])
+
+		group_rows = analysis_mod._excel_rows(
+			{
+				"group_by": "Item Group",
+				"rows": [{"item_group": "Products", "amount": 9}],
+				"grand_total": 9,
+			}
+		)
+		self.assertEqual(group_rows[0][0], "Item Group")
+		self.assertEqual(group_rows[1], ["Products", 9.0])
 
 	def test_base_conditions_include_submitted_returns(self):
 		meta = DOCTYPE_META["Sales Invoice"]
@@ -367,6 +442,61 @@ class TestApiHelpers(UnitTestCase):
 		joined = " ".join(captured)
 		self.assertIn("doc.base_grand_total", joined)
 		self.assertNotIn("base_net_total", joined)
+		self.assertIn("GROUP BY doc.customer", joined)
+
+	def test_parent_query_invoice_groups_by_document(self):
+		captured = []
+
+		def fake_sql(query, *args, **kwargs):
+			captured.append(query)
+			if "COUNT" in query:
+				return [(0,)]
+			if "COALESCE" in query:
+				return [(0,)]
+			return []
+
+		with patch("sales_person_analysis.api.analysis.frappe.db.sql", side_effect=fake_sql):
+			analysis_mod._query_parent_totals(
+				"Sales Invoice",
+				["doc.docstatus = 1"],
+				{"parenttype": "Sales Invoice"},
+				1,
+				20,
+				0,
+				"Invoice",
+			)
+		joined = " ".join(captured)
+		self.assertIn("doc.name AS invoice", joined)
+		self.assertIn("GROUP BY doc.name, doc.customer", joined)
+		self.assertIn("doc.base_grand_total", joined)
+		self.assertNotIn("tabSales Invoice Item", joined)
+
+	def test_parent_query_item_uses_line_amounts(self):
+		captured = []
+
+		def fake_sql(query, *args, **kwargs):
+			captured.append(query)
+			if "COUNT" in query:
+				return [(0,)]
+			if "COALESCE" in query:
+				return [(0,)]
+			return []
+
+		with patch("sales_person_analysis.api.analysis.frappe.db.sql", side_effect=fake_sql):
+			analysis_mod._query_parent_totals(
+				"Sales Invoice",
+				["doc.docstatus = 1"],
+				{"parenttype": "Sales Invoice"},
+				1,
+				20,
+				0,
+				"Item",
+			)
+		joined = " ".join(captured)
+		self.assertIn("item_row.item_code AS item", joined)
+		self.assertIn("GROUP BY item_row.item_code", joined)
+		self.assertIn("tabSales Invoice Item", joined)
+		self.assertIn("tabItem Wise Tax Detail", joined)
 
 	def test_item_group_query_sums_inclusive_lines(self):
 		captured = []
@@ -395,6 +525,35 @@ class TestApiHelpers(UnitTestCase):
 		self.assertNotIn("category", joined)
 		self.assertIn("doc.base_grand_total", joined)
 		self.assertNotIn("SUM(item_row.base_net_amount)", joined)
+		self.assertIn("GROUP BY doc.customer", joined)
+
+	def test_item_query_groups_by_item_group(self):
+		captured = []
+
+		def fake_sql(query, *args, **kwargs):
+			captured.append(query)
+			if "COUNT" in query:
+				return [(0,)]
+			if "COALESCE" in query:
+				return [(0,)]
+			return []
+
+		with patch("sales_person_analysis.api.analysis.frappe.db.sql", side_effect=fake_sql):
+			analysis_mod._query_with_item_groups(
+				"Sales Invoice",
+				analysis_mod.DOCTYPE_META["Sales Invoice"],
+				["doc.docstatus = 1"],
+				{"parenttype": "Sales Invoice"},
+				["Products"],
+				1,
+				20,
+				0,
+				"Item Group",
+			)
+		joined = " ".join(captured)
+		self.assertIn("item.item_group AS item_group", joined)
+		self.assertIn("GROUP BY item.item_group", joined)
+		self.assertIn("item.item_group IN %(item_groups)s", joined)
 
 
 def frappe_dict(**kwargs):

@@ -38,6 +38,10 @@ Amount rules
   to deliver. All is both, and it is the default. See _delivery_condition.
 - Sales Order has no return document. A credit note does not change a
   submitted order's base_grand_total, so Sales Order mode is order totals only.
+- Group by Customer or Invoice without an item-group filter uses each
+  document's base_grand_total. Group by Item or Item Group, and any group
+  once an item-group filter is on, uses inclusive_line_amount() so a
+  document's lines still sum to its base_grand_total.
 """
 
 from __future__ import annotations
@@ -67,6 +71,11 @@ from sales_person_analysis.constants import (
 	DELIVERY_PENDING,
 	DELIVERY_STATUSES,
 	DOCUMENT_STATUSES,
+	GROUP_BY_OPTIONS,
+	GROUP_CUSTOMER,
+	GROUP_INVOICE,
+	GROUP_ITEM,
+	GROUP_ITEM_GROUP,
 	MAX_EXPORT_FILENAME,
 	MAX_EXPORT_ROWS,
 	STATUS_ALL,
@@ -140,6 +149,7 @@ def get_customer_wise_sales(filters=None):
 	doctype = _validate_doctype(filters.get("doctype") or "Sales Invoice")
 	status = _validate_status(filters.get("status"))
 	delivery_status = _validate_delivery_status(filters.get("delivery_status"))
+	group_by = _validate_group_by(filters.get("group_by"))
 
 	page = max(cint(filters.get("page") or 1), 1)
 	page_size = cint(filters.get("page_size") or DEFAULT_PAGE_SIZE)
@@ -157,7 +167,7 @@ def get_customer_wise_sales(filters=None):
 
 	month_nums = resolve_months(filters.get("half"), filters.get("quarter"), filters.get("months"))
 	if month_nums is not None and not month_nums:
-		return _empty_result(company, doctype, page, page_size, status, delivery_status)
+		return _empty_result(company, doctype, page, page_size, status, delivery_status, group_by)
 
 	weeks = parse_week_list(filters.get("weeks"))
 	item_groups = _parse_names(filters.get("item_groups"))
@@ -175,13 +185,13 @@ def get_customer_wise_sales(filters=None):
 		delivery_status,
 	)
 
-	if item_groups:
-		rows, grand_total, customer_count = _query_with_item_groups(
-			doctype, meta, conditions, values, item_groups, page, page_size, export
+	if _uses_item_level(group_by, item_groups):
+		rows, grand_total, group_count = _query_with_item_groups(
+			doctype, meta, conditions, values, item_groups, page, page_size, export, group_by
 		)
 	else:
-		rows, grand_total, customer_count = _query_parent_totals(
-			doctype, conditions, values, page, page_size, export
+		rows, grand_total, group_count = _query_parent_totals(
+			doctype, conditions, values, page, page_size, export, group_by
 		)
 
 	currency = frappe.get_cached_value("Company", company, "default_currency") or ""
@@ -191,12 +201,13 @@ def get_customer_wise_sales(filters=None):
 		"doctype": doctype,
 		"status": status,
 		"delivery_status": delivery_status,
+		"group_by": group_by,
 		"rows": rows,
 		"grand_total": flt(grand_total),
-		"customer_count": cint(customer_count),
+		"customer_count": cint(group_count),
 		"page": page,
 		"page_size": page_size if not export else len(rows),
-		"total_pages": max(1, (cint(customer_count) + page_size - 1) // page_size) if page_size else 1,
+		"total_pages": max(1, (cint(group_count) + page_size - 1) // page_size) if page_size else 1,
 	}
 
 
@@ -239,22 +250,57 @@ def _export_filename(doctype: str | None = None, year=None) -> str:
 
 
 def _excel_rows(data) -> list:
-	"""Two-column sheet: customer, VAT-inclusive amount, then grand total."""
+	"""Grouped sheet: identity columns, VAT-inclusive amount, then grand total."""
 	data = data or {}
+	group_by = _validate_group_by(data.get("group_by"))
+	doctype = data.get("doctype") or "Sales Invoice"
 	currency = data.get("currency") or ""
 	amount_header = _("Sales Amount incl. VAT")
 	if currency:
 		amount_header = f"{amount_header} ({currency})"
-	rows = [[_("Customer"), amount_header]]
+	headers = _excel_headers(group_by, doctype, amount_header)
+	rows = [headers]
 	for row in data.get("rows") or []:
-		name = row.get("customer_name") or row.get("customer") or ""
-		rows.append([name, flt(row.get("amount"))])
-	rows.append([_("Grand Total (incl. VAT)"), flt(data.get("grand_total"))])
+		rows.append(_excel_data_row(group_by, row))
+	blank = [""] * (len(headers) - 2)
+	rows.append([_("Grand Total (incl. VAT)"), *blank, flt(data.get("grand_total"))])
 	return rows
 
 
+def _excel_headers(group_by: str, doctype: str, amount_header: str) -> list:
+	if group_by == GROUP_INVOICE:
+		doc_label = _("Invoice") if doctype == "Sales Invoice" else _("Order")
+		return [doc_label, _("Customer"), amount_header]
+	if group_by == GROUP_ITEM:
+		return [_("Item"), amount_header]
+	if group_by == GROUP_ITEM_GROUP:
+		return [_("Item Group"), amount_header]
+	return [_("Customer"), amount_header]
+
+
+def _excel_data_row(group_by: str, row) -> list:
+	amount = flt(row.get("amount"))
+	if group_by == GROUP_INVOICE:
+		return [
+			row.get("invoice") or "",
+			row.get("customer_name") or row.get("customer") or "",
+			amount,
+		]
+	if group_by == GROUP_ITEM:
+		return [row.get("item_name") or row.get("item") or "", amount]
+	if group_by == GROUP_ITEM_GROUP:
+		return [row.get("item_group") or "", amount]
+	return [row.get("customer_name") or row.get("customer") or "", amount]
+
+
 def _empty_result(
-	company, doctype, page, page_size, status=STATUS_ALL, delivery_status=DELIVERY_ALL
+	company,
+	doctype,
+	page,
+	page_size,
+	status=STATUS_ALL,
+	delivery_status=DELIVERY_ALL,
+	group_by=GROUP_CUSTOMER,
 ):
 	currency = frappe.get_cached_value("Company", company, "default_currency") or ""
 	return {
@@ -263,6 +309,7 @@ def _empty_result(
 		"doctype": doctype,
 		"status": status,
 		"delivery_status": delivery_status,
+		"group_by": _validate_group_by(group_by),
 		"rows": [],
 		"grand_total": 0.0,
 		"customer_count": 0,
@@ -291,6 +338,58 @@ def _validate_delivery_status(delivery_status: str | None) -> str:
 	if delivery_status not in DELIVERY_STATUSES:
 		frappe.throw(_("Delivery status must be All, Delivered, or Pending"))
 	return delivery_status
+
+
+def _validate_group_by(group_by: str | None) -> str:
+	group_by = (group_by or GROUP_CUSTOMER).strip()
+	if group_by not in GROUP_BY_OPTIONS:
+		frappe.throw(_("Group by must be Invoice, Customer, Item, or Item Group"))
+	return group_by
+
+
+def _uses_item_level(group_by: str, item_groups) -> bool:
+	"""Item and Item Group always need lines. An item-group chip does too."""
+	group_by = _validate_group_by(group_by)
+	return bool(item_groups) or group_by in (GROUP_ITEM, GROUP_ITEM_GROUP)
+
+
+def _group_spec(group_by: str):
+	"""SELECT / GROUP BY / ORDER BY for one grouping. {amount} is filled later."""
+	group_by = _validate_group_by(group_by)
+	if group_by == GROUP_INVOICE:
+		return frappe._dict(
+			select=(
+				"doc.name AS invoice, doc.customer AS customer, "
+				"MAX(doc.customer_name) AS customer_name, SUM({amount}) AS amount"
+			),
+			group="doc.name, doc.customer",
+			order="amount DESC, invoice ASC",
+			count_group="doc.name",
+		)
+	if group_by == GROUP_ITEM:
+		return frappe._dict(
+			select=(
+				"item_row.item_code AS item, "
+				"MAX(IFNULL(item_row.item_name, item.item_name)) AS item_name, "
+				"SUM({amount}) AS amount"
+			),
+			group="item_row.item_code",
+			order="amount DESC, item_name ASC",
+			count_group="item_row.item_code",
+		)
+	if group_by == GROUP_ITEM_GROUP:
+		return frappe._dict(
+			select="item.item_group AS item_group, SUM({amount}) AS amount",
+			group="item.item_group",
+			order="amount DESC, item_group ASC",
+			count_group="item.item_group",
+		)
+	return frappe._dict(
+		select=("doc.customer AS customer, MAX(doc.customer_name) AS customer_name, SUM({amount}) AS amount"),
+		group="doc.customer",
+		order="amount DESC, customer_name ASC",
+		count_group="doc.customer",
+	)
 
 
 def _payment_condition(doctype: str, status: str, alias: str = "doc") -> str | None:
@@ -620,58 +719,39 @@ def _item_inclusive_amount_sql() -> str:
 	"""
 
 
-def _query_parent_totals(doctype, conditions, values, page, page_size, export):
-	where_sql = " AND ".join(conditions)
-	amount_sql = _parent_amount_sql()
-	count_row = frappe.db.sql(
-		f"""
-		SELECT COUNT(*) FROM (
-			SELECT doc.customer
-			FROM `tab{doctype}` doc
-			WHERE {where_sql}
-			GROUP BY doc.customer
-		) t
-		""",
+def _query_parent_totals(doctype, conditions, values, page, page_size, export, group_by=GROUP_CUSTOMER):
+	group_by = _validate_group_by(group_by)
+	if _uses_item_level(group_by, []):
+		return _query_item_level(
+			doctype, DOCTYPE_META[doctype], conditions, values, [], page, page_size, export, group_by
+		)
+	return _query_grouped_sql(
+		f"FROM `tab{doctype}` doc",
+		conditions,
 		values,
+		_parent_amount_sql(),
+		page,
+		page_size,
+		export,
+		group_by,
 	)
-	customer_count = cint(count_row[0][0]) if count_row else 0
 
-	total_row = frappe.db.sql(
-		f"""
-		SELECT COALESCE(SUM({amount_sql}), 0)
-		FROM `tab{doctype}` doc
-		WHERE {where_sql}
-		""",
-		values,
+
+def _query_with_item_groups(
+	doctype, meta, conditions, values, item_groups, page, page_size, export, group_by=GROUP_CUSTOMER
+):
+	return _query_item_level(
+		doctype, meta, conditions, values, item_groups, page, page_size, export, group_by
 	)
-	grand_total = flt(total_row[0][0]) if total_row else 0.0
-
-	limit_sql, values = _limit_clause(values, page, page_size, export, customer_count)
-	rows = frappe.db.sql(
-		f"""
-		SELECT
-			doc.customer AS customer,
-			MAX(doc.customer_name) AS customer_name,
-			SUM({amount_sql}) AS amount
-		FROM `tab{doctype}` doc
-		WHERE {where_sql}
-		GROUP BY doc.customer
-		ORDER BY amount DESC, customer_name ASC
-		{limit_sql}
-		""",
-		values,
-		as_dict=True,
-	)
-	return _format_rows(rows), grand_total, customer_count
 
 
-def _query_with_item_groups(doctype, meta, conditions, values, item_groups, page, page_size, export):
+def _query_item_level(doctype, meta, conditions, values, item_groups, page, page_size, export, group_by):
 	item_doctype = meta["item_doctype"]
-	conditions = [*conditions, "item.item_group IN %(item_groups)s"]
-	values = {**values, "item_groups": item_groups}
-	where_sql = " AND ".join(conditions)
-	amount_sql = _item_inclusive_amount_sql()
-
+	conditions = list(conditions)
+	values = dict(values)
+	if item_groups:
+		conditions.append("item.item_group IN %(item_groups)s")
+		values["item_groups"] = item_groups
 	from_sql = f"""
 		FROM `tab{doctype}` doc
 		INNER JOIN `tab{item_doctype}` item_row
@@ -679,19 +759,35 @@ def _query_with_item_groups(doctype, meta, conditions, values, item_groups, page
 		INNER JOIN `tabItem` item ON item.name = item_row.item_code
 		{_item_tax_joins()}
 	"""
+	return _query_grouped_sql(
+		from_sql,
+		conditions,
+		values,
+		_item_inclusive_amount_sql(),
+		page,
+		page_size,
+		export,
+		group_by,
+	)
+
+
+def _query_grouped_sql(from_sql, conditions, values, amount_sql, page, page_size, export, group_by):
+	spec = _group_spec(group_by)
+	where_sql = " AND ".join(conditions)
+	select_sql = spec.select.replace("{amount}", amount_sql)
 
 	count_row = frappe.db.sql(
 		f"""
 		SELECT COUNT(*) FROM (
-			SELECT doc.customer
+			SELECT {spec.count_group}
 			{from_sql}
 			WHERE {where_sql}
-			GROUP BY doc.customer
+			GROUP BY {spec.group}
 		) t
 		""",
 		values,
 	)
-	customer_count = cint(count_row[0][0]) if count_row else 0
+	group_count = cint(count_row[0][0]) if count_row else 0
 
 	total_row = frappe.db.sql(
 		f"""
@@ -703,23 +799,20 @@ def _query_with_item_groups(doctype, meta, conditions, values, item_groups, page
 	)
 	grand_total = flt(total_row[0][0]) if total_row else 0.0
 
-	limit_sql, values = _limit_clause(values, page, page_size, export, customer_count)
+	limit_sql, values = _limit_clause(values, page, page_size, export, group_count)
 	rows = frappe.db.sql(
 		f"""
-		SELECT
-			doc.customer AS customer,
-			MAX(doc.customer_name) AS customer_name,
-			SUM({amount_sql}) AS amount
+		SELECT {select_sql}
 		{from_sql}
 		WHERE {where_sql}
-		GROUP BY doc.customer
-		ORDER BY amount DESC, customer_name ASC
+		GROUP BY {spec.group}
+		ORDER BY {spec.order}
 		{limit_sql}
 		""",
 		values,
 		as_dict=True,
 	)
-	return _format_rows(rows), grand_total, customer_count
+	return _format_rows(rows), grand_total, group_count
 
 
 def _limit_clause(values, page, page_size, export, customer_count):
@@ -733,11 +826,16 @@ def _limit_clause(values, page, page_size, export, customer_count):
 def _format_rows(rows):
 	formatted = []
 	for row in rows:
-		formatted.append(
-			{
-				"customer": row.customer,
-				"customer_name": row.customer_name or row.customer or _("(No Customer)"),
-				"amount": flt(row.amount),
-			}
-		)
+		out = {"amount": flt(row.get("amount"))}
+		if "invoice" in row:
+			out["invoice"] = row.get("invoice")
+		if "customer" in row or "customer_name" in row:
+			out["customer"] = row.get("customer")
+			out["customer_name"] = row.get("customer_name") or row.get("customer") or _("(No Customer)")
+		if "item" in row:
+			out["item"] = row.get("item")
+			out["item_name"] = row.get("item_name") or row.get("item") or _("(No Item)")
+		if "item_group" in row:
+			out["item_group"] = row.get("item_group") or _("(No Item Group)")
+		formatted.append(out)
 	return formatted
